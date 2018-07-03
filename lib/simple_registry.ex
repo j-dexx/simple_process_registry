@@ -6,50 +6,42 @@ defmodule SimpleRegistry do
   end
 
   def register(key) do
-    GenServer.call(__MODULE__, {:register, key, self()})
+    # We're linking to the registry server first, to avoid possible race condition.Note that it's therefore possible
+    # that a caller process is linked, even though the registration fails. We can't simply unlink on a failing
+    # registration, since a process might be registered under some other term. To properly solve this, we'd need another
+    # ETS table to keep track of whether a process is already registered under some other term. To keep things simple,
+    # this is not done here. For a proper implementation, you can study the Registry code at
+    # https://github.com/elixir-lang/elixir/blob/master/lib/elixir/lib/registry.ex
+    Process.link(Process.whereis(__MODULE__))
+
+    if :ets.insert_new(__MODULE__, {key, self()}) do
+      :ok
+    else
+      :error
+    end
   end
 
   def whereis(key) do
-    GenServer.call(__MODULE__, {:whereis, key})
+    case :ets.lookup(__MODULE__, key) do
+      [{^key, pid}] -> pid
+      [] -> nil
+    end
   end
 
   @impl GenServer
   def init(_) do
     Process.flag(:trap_exit, true)
+    :ets.new(__MODULE__, [:named_table, :public, read_concurrency: true, write_concurrency: true])
     {:ok, %{}}
   end
 
   @impl GenServer
-  def handle_call({:register, key, pid}, _, process_registry) do
-    case Map.get(process_registry, key) do
-      nil ->
-        Process.link(pid)
-        {:reply, :ok, Map.put(process_registry, key, pid)}
-
-      _ ->
-        {:reply, :error, process_registry}
-    end
-  end
-
-  @impl GenServer
-  def handle_call({:whereis, key}, _, process_registry) do
-    {:reply, Map.get(process_registry, key), process_registry}
-  end
-
-   @impl GenServer
-  def handle_info({:EXIT, pid, _reason}, process_registry) do
-    {:noreply, deregister_pid(process_registry, pid)}
+  def handle_info({:EXIT, pid, _reason}, state) do
+    :ets.match_delete(__MODULE__, {:_, pid})
+    {:noreply, state}
   end
 
   def handle_info(other, process_registry) do
     super(other, process_registry)
-  end
-
-  defp deregister_pid(process_registry, pid) do
-    # We'll walk through each {key, value} item, and keep those elements whose
-    # value is different to the provided pid.
-    process_registry
-    |> Enum.reject(fn {_key, registered_process} -> registered_process == pid end)
-    |> Enum.into(%{})
   end
 end
